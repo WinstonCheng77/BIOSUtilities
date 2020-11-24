@@ -7,7 +7,7 @@ AMI BIOS Guard Extractor
 Copyright (C) 2018-2020 Plato Mavropoulos
 """
 
-print('AMI BIOS Guard Extractor v3.0_a0')
+print('AMI BIOS Guard Extractor v3.0_a1')
 
 import os
 import re
@@ -42,15 +42,17 @@ class PFAT_Header(ctypes.LittleEndianStructure) :
 class PFAT_Block_Header(ctypes.LittleEndianStructure) :
 	_pack_ = 1
 	_fields_ = [
-		('Revision',		uint32_t),		# 0x00 PFAT
-		('Platform',		char*16),		# 0x04
-		('Unknown0',		uint32_t),		# 0x14
-		('Unknown1',		uint32_t),		# 0x18
-		('ScriptSize',		uint32_t),		# 0x1C From Block Header end
-		('DataSize',		uint32_t),		# 0x20 From Block Flags end
-		('Unknown2',		uint32_t),		# 0x24
-		('Unknown3',		uint32_t),		# 0x28
-		('Unknown4',		uint32_t),		# 0x2C
+		('PFATVerMajor',	uint16_t),		# 0x00
+		('PFATVerMinor',	uint16_t),		# 0x02
+		('PlatformID',		uint8_t*16),	# 0x04
+		('Attributes',		uint32_t),		# 0x14
+		('ScriptVerMajor',	uint16_t),		# 0x16
+		('ScriptVerMinor',	uint16_t),		# 0x18
+		('ScriptSize',		uint32_t),		# 0x1C
+		('DataSize',		uint32_t),		# 0x20
+		('BIOSSVN',			uint32_t),		# 0x24
+		('ECSVN',			uint32_t),		# 0x28
+		('VendorInfo',		uint32_t),		# 0x2C
 		# 0x30
 	]
 	
@@ -58,17 +60,52 @@ class PFAT_Block_Header(ctypes.LittleEndianStructure) :
 		super().__init__(*args, **kwargs)
 		self.count = count
 	
+	def get_flags(self) :
+		attr = PFAT_Block_Header_GetAttributes()
+		attr.asbytes = self.Attributes
+		
+		return attr.b.SFAM, attr.b.ProtectEC, attr.b.GFXMitDis, attr.b.FTU, attr.b.Reserved
+	
 	def pfat_print(self) :
+		no_yes = ['No','Yes']
+		f1,f2,f3,f4,f5 = self.get_flags()
+		
+		platform = bytes([int.from_bytes(struct.pack('<B', val), 'little') for val in self.PlatformID]).strip(b'\x00')
+		if platform.isalpha() : # STRING
+			platform = platform.decode('utf-8')
+		else : # GUID
+			platform = ''.join('%0.2X' % int.from_bytes(struct.pack('<B', val), 'little') for val in self.PlatformID)
+			platform = '{%s-%s-%s-%s-%s}' % (platform[:8], platform[8:12], platform[12:16], platform[16:20], platform[20:])
+		
 		print('\n        PFAT Block %s Header:\n' % self.count)
-		print('            Revision    : %d' % self.Revision)
-		print('            Platform    : %s' % self.Platform.decode('utf-8'))
-		print('            Unknown 0   : 0x%X' % self.Unknown0)
-		print('            Unknown 1   : 0x%X' % self.Unknown1)
-		print('            Script Size : 0x%X' % self.ScriptSize)
-		print('            Data Size   : 0x%X' % self.DataSize)
-		print('            Unknown 2   : 0x%X' % self.Unknown2)
-		print('            Unknown 3   : 0x%X' % self.Unknown3)
-		print('            Unknown 4   : 0x%X' % self.Unknown4)
+		print('            PFAT Version              : %d.%d' % (self.PFATVerMajor, self.PFATVerMinor))
+		print('            Platform ID               : %s' % platform)
+		print('            Signed Flash Address Map  : %s' % no_yes[f1])
+		print('            Protected EC OpCodes      : %s' % no_yes[f2])
+		print('            Graphics Security Disable : %s' % no_yes[f3])
+		print('            Fault Tolerant Update     : %s' % no_yes[f4])
+		print('            Attributes Reserved       : 0x%X' % f5)
+		print('            Script Version            : %d.%d' % (self.ScriptVerMajor, self.ScriptVerMinor))
+		print('            Script Size               : 0x%X' % self.ScriptSize)
+		print('            Data Size                 : 0x%X' % self.DataSize)
+		print('            BIOS SVN                  : %d' % self.BIOSSVN)
+		print('            EC SVN                    : %d' % self.ECSVN)
+		print('            Vendor Info               : 0x%X' % self.VendorInfo)
+		
+class PFAT_Block_Header_Attributes(ctypes.LittleEndianStructure):
+	_fields_ = [
+		('SFAM', uint32_t, 1), # Signed Flash Address Map
+		('ProtectEC', uint32_t, 1), # Protected EC OpCodes
+		('GFXMitDis', uint32_t, 1), # GFX Security Disable
+		('FTU', uint32_t, 1), # Fault Tolerant Update
+		('Reserved', uint32_t, 28)
+	]
+
+class PFAT_Block_Header_GetAttributes(ctypes.Union):
+	_fields_ = [
+		('b', PFAT_Block_Header_Attributes),
+		('asbytes', uint32_t)
+	]
 
 class PFAT_Block_RSA(ctypes.LittleEndianStructure) :
 	_pack_ = 1
@@ -90,11 +127,11 @@ class PFAT_Block_RSA(ctypes.LittleEndianStructure) :
 		RSASignature = ''.join('%0.8X' % int.from_bytes(struct.pack('<I', val), 'little') for val in reversed(self.Signature))
 		
 		print('\n        PFAT Block %s Signature:\n' % self.count)
-		print('            Unknown 0   : 0x%X' % self.Unknown0)
-		print('            Unknown 1   : 0x%X' % self.Unknown1)
-		print('            Public Key  : %s [...]' % RSAPublicKey[:8])
-		print('            Exponent    : 0x%X' % self.Exponent)
-		print('            Signature   : %s [...]' % RSASignature[:8])
+		print('            Unknown 0                 : 0x%X' % self.Unknown0)
+		print('            Unknown 1                 : 0x%X' % self.Unknown1)
+		print('            Public Key                : %s [...]' % RSAPublicKey[:8])
+		print('            Exponent                  : 0x%X' % self.Exponent)
+		print('            Signature                 : %s [...]' % RSASignature[:8])
 
 # Process ctypes Structure Classes
 def get_struct(buffer, start_offset, class_name, param_list = None) :
@@ -126,7 +163,7 @@ else :
 			pfat.append(os.path.join(root, name))
 
 pfat_index = 0
-pfat_pat = re.compile(b'_AMIPFAT')
+pfat_pat = re.compile(b'_AMIPFAT.AMI_BIOS_GUARD_FLASH_CONFIGURATIONS', re.DOTALL)
 
 for input_file in pfat :
 	with open(input_file, 'rb') as in_file : buffer = in_file.read()
@@ -157,6 +194,7 @@ for input_file in pfat :
 		entry_blocks = int(entry_data[2])
 		entry_name = entry_data[3][1:]
 		entry_flags = ','.join([flags[bit] for bit in range(4) if int(entry_data[0]) >> bit & 1])
+		if not entry_flags : entry_flags = 'N/A'
 		
 		for i in range(entry_blocks) : blocks.append([entry_name, entry_param, entry_flags, i + 1, entry_blocks])
 		

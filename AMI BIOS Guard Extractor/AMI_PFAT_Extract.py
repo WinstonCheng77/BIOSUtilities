@@ -7,13 +7,22 @@ AMI BIOS Guard Extractor
 Copyright (C) 2018-2020 Plato Mavropoulos
 """
 
-print('AMI BIOS Guard Extractor v3.0_a1')
+print('AMI BIOS Guard Extractor v3.0_a2')
 
+import sys
+
+# Detect Python version
+py_ver = sys.version_info
+if py_ver < (3,8) :
+	sys.stdout.write('\n\nError: Python >= 3.8 required, not %d.%d!\n' % (py_ver[0], py_ver[1]))
+	(raw_input if py_ver[0] <= 2 else input)('\nPress enter to exit')
+	sys.exit(1)
+	
 import os
 import re
-import sys
 import ctypes
 import struct
+import shutil
 
 # Set ctypes Structure types
 char = ctypes.c_char
@@ -143,12 +152,88 @@ def get_struct(buffer, start_offset, class_name, param_list = None) :
 	fit_len = min(len(struct_data), struct_len)
 	
 	if (start_offset >= len(buffer)) or (fit_len < struct_len) :
-		print('Error: Offset 0x%X out of bounds at %s, possibly incomplete image!' % (start_offset, class_name))
+		print('Error: Offset 0x%X out of bounds at %s, possibly incomplete image!' % (start_offset, class_name.__name__))
 		sys.exit(1)
 	
 	ctypes.memmove(ctypes.addressof(structure), struct_data, fit_len)
 	
 	return structure
+
+# Script OpCodes
+opcodes = {
+	0x00 : 'nop',
+	0x01 : 'begin',
+	0x10 : 'write',
+	0x11 : 'write',
+	0x12 : 'read',
+	0x13 : 'read',
+	0x14 : 'eraseblk',
+	0x15 : 'erase64kblk',
+	0x17 : 'sub',
+	0x20 : 'eccmdwr',
+	0x22 : 'ecstsrd',
+	0x23 : 'ecdatawr',
+	0x25 : 'ecdatard',
+	0x30 : 'add',
+	0x31 : 'add',
+	0x32 : 'add',
+	0x33 : 'add',
+	0x34 : 'add',
+	0x35 : 'add',
+	0x36 : 'sub',
+	0x37 : 'sub',
+	0x38 : 'sub',
+	0x39 : 'sub',
+	0x3A : 'sub',
+	0x3B : 'sub',
+	0x40 : 'and',
+	0x41 : 'and',
+	0x42 : 'or',
+	0x43 : 'or',
+	0x44 : 'shiftr',
+	0x45 : 'shiftl',
+	0x46 : 'rotater',
+	0x47 : 'rotatel',
+	0x50 : 'set',
+	0x51 : 'set',
+	0x52 : 'set',
+	0x53 : 'set',
+	0x54 : 'set',
+	0x55 : 'set',
+	0x60 : 'loadbyte',
+	0x61 : 'loadword',
+	0x62 : 'loaddword',
+	0x63 : 'storebyte',
+	0x64 : 'storeword',
+	0x65 : 'storedword',
+	0x70 : 'compare',
+	0x71 : 'compare',
+	0x72 : 'compare',
+	0x73 : 'compare',
+	0x74 : 'compare',
+	0x75 : 'compare',
+	0x76 : 'compare',
+	0x77 : 'compare',
+	0x80 : 'copy',
+	0x81 : 'copy',
+	0x90 : 'jmp',
+	0x91 : 'je',
+	0x92 : 'jne',
+	0x93 : 'jg',
+	0x94 : 'jge',
+	0x95 : 'jl',
+	0x96 : 'jle',
+	0x97 : 'jmp',
+	0xA1 : 'log',
+	0xB0 : 'rdsts',
+	0xB1 : 'rdkeyslot',
+	0xB2 : 'rdrand',
+	0xC0 : 'stall',
+	0xC1 : 'rdts',
+	0xC2 : 'setts',
+	0xC3 : 'clearts',
+	0xFF : 'end'
+}
 	
 if len(sys.argv) >= 2 :
 	# Drag & Drop or CLI
@@ -162,16 +247,23 @@ else :
 		for name in files :
 			pfat.append(os.path.join(root, name))
 
-pfat_index = 0
+pfat_index = 1
+output_path = ''
 pfat_pat = re.compile(b'_AMIPFAT.AMI_BIOS_GUARD_FLASH_CONFIGURATIONS', re.DOTALL)
 
 for input_file in pfat :
-	with open(input_file, 'rb') as in_file : buffer = in_file.read()
+	input_name,input_extension = os.path.splitext(os.path.basename(input_file))
+	input_name_ext = '%s.%s' % (input_name, input_extension)
+	input_dir = os.path.dirname(os.path.abspath(input_file))
+	
+	file_data = b''
 	final_image = b''
 	block_name = ''
 	block_count = 0
+	file_index = 0
 	blocks = []
-	flags = ['Update','Unknown 1','Unknown 2','Unknown 3']
+	
+	with open(input_file, 'rb') as in_file : buffer = in_file.read()
 	
 	pfat_match = pfat_pat.search(buffer)
 	
@@ -187,14 +279,22 @@ for input_file in pfat :
 	pfat_hdr.pfat_print()
 	print('    Title       : %s' % hdr_data[0])
 	
+	if pfat_index == 1 :
+		output_path = os.path.join(input_dir, '%s%s' % (input_name, input_extension) + '_extracted') # Set extraction directory
+		
+		if os.path.isdir(output_path) : shutil.rmtree(output_path) # Delete any existing extraction directory
+		
+		os.mkdir(output_path) # Create extraction directory
+	
+	file_path = os.path.join(output_path, '%d' % pfat_index)
+	
 	for entry in hdr_data[1:] :
 		entry_data = entry.split(' ')
 		entry_data = [s for s in entry_data if s != '']
+		entry_flags = int(entry_data[0])
 		entry_param = entry_data[1]
 		entry_blocks = int(entry_data[2])
 		entry_name = entry_data[3][1:]
-		entry_flags = ','.join([flags[bit] for bit in range(4) if int(entry_data[0]) >> bit & 1])
-		if not entry_flags : entry_flags = 'N/A'
 		
 		for i in range(entry_blocks) : blocks.append([entry_name, entry_param, entry_flags, i + 1, entry_blocks])
 		
@@ -202,43 +302,57 @@ for input_file in pfat :
 	
 	block_start = hdr_size
 	for i in range(block_count) :
-		if blocks[i][0] != block_name : print('\n    %s (Parameter: %s, Flags: %s)' % (blocks[i][0], blocks[i][1], blocks[i][2]))
+		is_file_start = blocks[i][0] != block_name
+		
+		if is_file_start : print('\n    %s (Parameter: %s, Flags: 0x%X)' % (blocks[i][0], blocks[i][1], blocks[i][2]))
+			
 		block_hdr = get_struct(buffer, block_start, PFAT_Block_Header, ['%d/%d' % (blocks[i][3], blocks[i][4])])
 		block_hdr_size = ctypes.sizeof(PFAT_Block_Header)
 		block_script_size = block_hdr.ScriptSize
 		block_script_data = buffer[block_start + block_hdr_size:block_start + block_hdr_size + block_script_size] # Script not parsed
 		block_data_start = block_start + block_hdr_size + block_script_size
 		block_data_end = block_data_start + block_hdr.DataSize
+		block_data = buffer[block_data_start:block_data_end]
+		
+		file_data += block_data
 		block_hdr.pfat_print()
 		
 		block_rsa = get_struct(buffer, block_data_end, PFAT_Block_RSA, ['%d/%d' % (blocks[i][3], blocks[i][4])])
 		block_rsa_size = ctypes.sizeof(PFAT_Block_RSA)
 		block_rsa.pfat_print()
 		
-		final_image += buffer[block_data_start:block_data_end]
+		print('\n        PFAT Block %d/%d Script:\n' % (blocks[i][3], blocks[i][4]))
+		script_opcodes = re.findall(b'.{8}', block_script_data, re.DOTALL)
+		for opcode in script_opcodes :
+			op = int.from_bytes(opcode[:2], 'little')
+			code = opcode[2:].hex(' ').upper()
+			if op in opcodes : print('            %0.2X' % op, opcodes[op].center(22), ':', code)
+			else : print('            %0.2X' % op, 'UNKNOWN'.center(22), ':', code)
+		
+		final_image += block_data
+		
+		if i and is_file_start and file_data :
+			file_index += 1
+			with open('%s__%d__%s' % (file_path, file_index, block_name), 'wb') as o : o.write(file_data)
+			file_data = b''
 		
 		block_name = blocks[i][0]
 		block_start = block_data_end + block_rsa_size
-		
+	
+	with open('%s__%d__%s' % (file_path, file_index + 1, block_name), 'wb') as o : o.write(file_data) # Last File
+	
+	with open(file_path + '.bin', 'wb') as final : final.write(final_image)
+	
 	tail_data = buffer[block_start:] # Store any data after the end of PFAT
-	
-	if pfat_index :
-		body_file = '%s_%d_PFAT.bin' % (os.path.basename(input_file)[:-11 if pfat_index <= 10 else -12], pfat_index)
-		tail_file = '%s_%d_REST.bin' % (os.path.basename(input_file)[:-11 if pfat_index <= 10 else -12], pfat_index)
-	else :
-		body_file = 'Unpacked_%s_%d_PFAT.bin' % (os.path.basename(input_file), pfat_index)
-		tail_file = 'Unpacked_%s_%d_REST.bin' % (os.path.basename(input_file), pfat_index)
-	
-	with open(body_file, 'wb') as final : final.write(final_image)
-	
 	if tail_data[:-0x100] != b'\xFF' * (len(tail_data) - 0x100) :
-		with open(tail_file, 'wb') as final : final.write(tail_data)
+		tail_path = '%s__%d__DATA_AFTER_PFAT_%d.bin' % (file_path, file_index + 2, pfat_index)
+		with open(tail_path, 'wb') as final : final.write(tail_data)
 		
 		if pfat_pat.search(tail_data) :
 			pfat_index += 1
-			pfat.append(tail_file)
+			pfat.append(tail_path)
 		else :
-			pfat_index = 0
+			pfat_index = 1
 		
 else :
 	input('\nDone!')
